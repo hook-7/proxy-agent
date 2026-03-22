@@ -15,8 +15,10 @@ class Settings(BaseSettings):
     agent_args_template: str = "-p {prompt}"
     agent_cwd: Path | None = None
     agent_timeout_sec: float = 300.0
+    agent_stream_stdout_chunk_size: int = 4096
+    agent_use_stdbuf: bool = True
     api_key: str | None = None
-    default_model: str = "proxy-agent"
+    default_model: str = "auto"
 
 
 @lru_cache

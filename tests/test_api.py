@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -7,6 +8,88 @@ from fastapi.testclient import TestClient
 
 from proxy_agent.core.config import Settings
 from proxy_agent.main import create_app
+
+
+def _parse_sse_events(body: str) -> list[dict | None]:
+    events: list[dict | None] = []
+    for block in body.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        for line in block.split("\n"):
+            if line.startswith("data: "):
+                payload = line[6:].strip()
+                if payload == "[DONE]":
+                    events.append(None)
+                else:
+                    events.append(json.loads(payload))
+    return events
+
+
+def test_chat_completions_stream_sse_echo(client: TestClient) -> None:
+    res = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        },
+    )
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers.get("content-type", "")
+    events = _parse_sse_events(res.text)
+    assert events[-1] is None
+    assert events[0]["object"] == "chat.completion.chunk"
+    assert events[0]["choices"][0]["delta"].get("role") == "assistant"
+    contents = [
+        e["choices"][0]["delta"].get("content")
+        for e in events
+        if e is not None and "choices" in e
+    ]
+    assert any(c and "hello" in c for c in contents if c)
+    non_done = [e for e in events if e is not None]
+    assert non_done[-1]["choices"][0].get("finish_reason") == "stop"
+
+
+def test_chat_completions_stream_multiple_chunks() -> None:
+    script = Path(__file__).resolve().parent / "fixtures" / "stream_lines.py"
+    settings = Settings(
+        agent_command=sys.executable,
+        agent_args_template=f"{script} {{prompt}}",
+        agent_timeout_sec=30.0,
+        default_model="stream-test",
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        res = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "x"}], "stream": True},
+        )
+    assert res.status_code == 200
+    events = [e for e in _parse_sse_events(res.text) if e is not None]
+    content_parts = [
+        e["choices"][0]["delta"].get("content")
+        for e in events
+        if e.get("choices") and e["choices"][0]["delta"].get("content")
+    ]
+    combined = "".join(c or "" for c in content_parts)
+    assert "chunk-a" in combined and "chunk-b" in combined
+
+
+def test_chat_completions_stream_timeout_yields_error_chunk() -> None:
+    settings = Settings(
+        agent_command="sleep",
+        agent_args_template="{prompt}",
+        agent_timeout_sec=0.2,
+        default_model="t",
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        res = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "5"}], "stream": True},
+        )
+    assert res.status_code == 200
+    assert "timed out" in res.text
 
 
 def test_chat_completions_simulated_agent_multiline_reply() -> None:
@@ -61,18 +144,6 @@ def test_chat_completions_custom_model(client: TestClient) -> None:
     )
     assert res.status_code == 200
     assert res.json()["model"] == "custom"
-
-
-def test_chat_completions_stream_not_supported(client: TestClient) -> None:
-    res = client.post(
-        "/v1/chat/completions",
-        json={
-            "messages": [{"role": "user", "content": "x"}],
-            "stream": True,
-        },
-    )
-    assert res.status_code == 400
-    assert res.json()["error"]["message"] == "stream=true is not supported"
 
 
 def test_chat_completions_no_user_message(client: TestClient) -> None:
