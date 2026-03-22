@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import errno
 import shlex
 import shutil
 import subprocess
@@ -9,6 +10,18 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 _STDERR_TAIL_MAX = 8000
+
+
+def _kill_process(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the child; ignore if already reaped (uvloop/asyncio may raise ProcessLookupError)."""
+
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    except OSError as e:
+        if e.errno != errno.ESRCH:
+            raise
 
 
 class AgentCliError(Exception):
@@ -71,8 +84,11 @@ async def run_agent_cli(
             timeout=timeout_sec,
         )
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        _kill_process(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except TimeoutError:
+            pass
         raise AgentCliError(
             f"Agent CLI timed out after {timeout_sec} seconds",
             exit_code=None,
@@ -100,6 +116,7 @@ async def stream_agent_cli(
     cwd: Path | None,
     timeout_sec: float,
     stdout_chunk_size: int = 4096,
+    eof_process_wait_sec: float = 30.0,
 ) -> AsyncIterator[str]:
     """Yield stdout as it arrives.
 
@@ -108,9 +125,11 @@ async def stream_agent_cli(
 
     If *stdout_chunk_size* is 0, use line mode (``readline``) instead.
 
-    Then ``wait()`` and drain stderr. On non-zero exit, yields one extra string with code and stderr
-    tail. On success with empty stdout but non-empty stderr, yields stderr. Enforces *timeout_sec*
-    wall-clock for reads, process wait, and drain.
+    After stdout reaches EOF, wait at most *eof_process_wait_sec* (unless 0 = use only global
+    *timeout_sec* budget) for the process to exit. If it still runs but we already streamed stdout,
+    the process is killed so the HTTP stream can emit ``[DONE]`` (many CLIs print then hang).
+
+    Then drain stderr. On non-zero exit, yields one extra string with code and stderr tail.
     """
 
     loop = asyncio.get_running_loop()
@@ -165,8 +184,11 @@ async def stream_agent_cli(
                 try:
                     line_b = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining())
                 except TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                    _kill_process(proc)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    except TimeoutError:
+                        pass
                     await cancel_drain()
                     raise AgentCliError(
                         f"Agent CLI timed out after {timeout_sec} seconds",
@@ -188,8 +210,11 @@ async def stream_agent_cli(
                         timeout=remaining(),
                     )
                 except TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                    _kill_process(proc)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    except TimeoutError:
+                        pass
                     await cancel_drain()
                     raise AgentCliError(
                         f"Agent CLI timed out after {timeout_sec} seconds",
@@ -208,25 +233,43 @@ async def stream_agent_cli(
                 yield tail
 
         if remaining() <= 0:
-            proc.kill()
-            await proc.wait()
+            _kill_process(proc)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
+                pass
             await cancel_drain()
             raise AgentCliError(
                 f"Agent CLI timed out after {timeout_sec} seconds",
                 exit_code=None,
                 stderr="",
             ) from None
+
+        if eof_process_wait_sec > 0:
+            wait_cap = min(remaining(), eof_process_wait_sec)
+        else:
+            wait_cap = remaining()
+
+        killed_stuck_after_stdout: bool = False
         try:
-            await asyncio.wait_for(proc.wait(), timeout=remaining())
+            await asyncio.wait_for(proc.wait(), timeout=wait_cap)
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
-            await cancel_drain()
-            raise AgentCliError(
-                f"Agent CLI timed out after {timeout_sec} seconds",
-                exit_code=None,
-                stderr="",
-            ) from None
+            _kill_process(proc)
+            try:
+                await asyncio.wait_for(
+                    proc.wait(),
+                    timeout=min(5.0, max(0.0, remaining())),
+                )
+            except TimeoutError:
+                pass
+            if not any_stdout:
+                await cancel_drain()
+                raise AgentCliError(
+                    f"Agent CLI timed out after {timeout_sec} seconds",
+                    exit_code=None,
+                    stderr="",
+                ) from None
+            killed_stuck_after_stdout = True
 
         if remaining() <= 0:
             await cancel_drain()
@@ -238,8 +281,11 @@ async def stream_agent_cli(
         try:
             await asyncio.wait_for(drain_task, timeout=remaining())
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
+            _kill_process(proc)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
+                pass
             await cancel_drain()
             raise AgentCliError(
                 f"Agent CLI timed out after {timeout_sec} seconds",
@@ -249,6 +295,8 @@ async def stream_agent_cli(
 
         stderr = b"".join(stderr_parts).decode(errors="replace")
         code = proc.returncode or 0
+        if killed_stuck_after_stdout and any_stdout:
+            code = 0
 
         if code != 0:
             tail = (stderr or "")[:_STDERR_TAIL_MAX]
@@ -257,7 +305,7 @@ async def stream_agent_cli(
             yield stderr if stderr.endswith("\n") else stderr + "\n"
     finally:
         if proc is not None and proc.returncode is None:
-            proc.kill()
+            _kill_process(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:

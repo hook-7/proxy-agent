@@ -1,16 +1,39 @@
 from __future__ import annotations
 
+import errno
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 
 from proxy_agent.services.cli_runner import (
     AgentCliError,
+    _kill_process,
     build_argv,
     run_agent_cli,
     stream_agent_cli,
     wrap_agent_argv_for_stdbuf,
 )
+
+
+def test_kill_process_swallows_process_lookup_error() -> None:
+    proc = MagicMock()
+    proc.kill.side_effect = ProcessLookupError()
+    _kill_process(proc)
+
+
+def test_kill_process_swallows_oserror_esrch() -> None:
+    proc = MagicMock()
+    proc.kill.side_effect = OSError(errno.ESRCH, "No such process")
+    _kill_process(proc)
+
+
+def test_kill_process_reraises_other_oserror() -> None:
+    proc = MagicMock()
+    proc.kill.side_effect = OSError(errno.EPERM, "Operation not permitted")
+    with pytest.raises(OSError) as exc_info:
+        _kill_process(proc)
+    assert exc_info.value.errno == errno.EPERM
 
 
 def test_build_argv_with_prompt_placeholder() -> None:
@@ -125,6 +148,21 @@ async def test_stream_agent_cli_nonzero_appends_exit_message(tmp_path) -> None:
         parts.append(p)
     assert len(parts) == 1
     assert "[agent exited with code 1]" in parts[0]
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_cli_kills_hung_child_after_stdout_eof(tmp_path) -> None:
+    """Child closes stdout but never exits — cap wait so stream can finish (OpenAI [DONE])."""
+    parts: list[str] = []
+    async for p in stream_agent_cli(
+        ["bash", "-c", "printf x; exec 1>&-; sleep 9999"],
+        cwd=tmp_path,
+        timeout_sec=60.0,
+        stdout_chunk_size=256,
+        eof_process_wait_sec=0.5,
+    ):
+        parts.append(p)
+    assert "x" in "".join(parts)
 
 
 @pytest.mark.asyncio

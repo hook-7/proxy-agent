@@ -9,12 +9,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from proxy_agent.api.deps import get_app_settings, verify_bearer
 from proxy_agent.core.config import Settings
+from proxy_agent.schemas.messages_prompt import messages_to_cli_prompt
 from proxy_agent.schemas.openai import (
     ChatCompletionRequest,
     ModelInfo,
     ModelsListResponse,
     build_chat_completion,
-    extract_last_user_text,
     format_sse,
     openai_error_payload,
     stream_chunk_content,
@@ -28,6 +28,7 @@ from proxy_agent.services.cli_runner import (
     stream_agent_cli,
     wrap_agent_argv_for_stdbuf,
 )
+from proxy_agent.services.sse_keepalive import merge_async_iter_with_sse_comments
 
 router = APIRouter()
 
@@ -55,7 +56,11 @@ async def chat_completions(
     _: Annotated[None, Depends(verify_bearer)],
 ) -> JSONResponse | StreamingResponse:
     try:
-        prompt = extract_last_user_text(body.messages)
+        prompt = messages_to_cli_prompt(
+            body.messages,
+            mode=settings.agent_messages_format,
+            max_chars=settings.agent_max_prompt_chars,
+        )
     except ValueError as e:
         return JSONResponse(
             status_code=400,
@@ -80,13 +85,23 @@ async def chat_completions(
                 )
             )
             try:
-                async for piece in stream_agent_cli(
-                    argv,
-                    cwd=cwd,
-                    timeout_sec=settings.agent_timeout_sec,
-                    stdout_chunk_size=settings.agent_stream_stdout_chunk_size,
+
+                def _cli_stream():
+                    return stream_agent_cli(
+                        argv,
+                        cwd=cwd,
+                        timeout_sec=settings.agent_timeout_sec,
+                        stdout_chunk_size=settings.agent_stream_stdout_chunk_size,
+                        eof_process_wait_sec=settings.agent_stream_eof_process_wait_sec,
+                    )
+
+                async for piece in merge_async_iter_with_sse_comments(
+                    _cli_stream,
+                    settings.agent_sse_comment_interval_sec,
                 ):
-                    if piece:
+                    if isinstance(piece, bytes):
+                        yield piece
+                    elif piece:
                         yield format_sse(
                             stream_chunk_content(
                                 completion_id=completion_id,
@@ -118,7 +133,7 @@ async def chat_completions(
 
         return StreamingResponse(
             event_gen(),
-            media_type="text/event-stream",
+            media_type="text/event-stream; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",

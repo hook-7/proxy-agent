@@ -81,6 +81,7 @@ def test_chat_completions_stream_timeout_yields_error_chunk() -> None:
         agent_args_template="{prompt}",
         agent_timeout_sec=0.2,
         default_model="t",
+        agent_messages_format="last_user_only",
     )
     app = create_app(settings)
     with TestClient(app) as c:
@@ -130,7 +131,7 @@ def test_chat_completions_echo(client: TestClient) -> None:
     data = res.json()
     assert data["object"] == "chat.completion"
     assert data["choices"][0]["message"]["role"] == "assistant"
-    assert data["choices"][0]["message"]["content"] == "hello"
+    assert data["choices"][0]["message"]["content"] == "User:\nhello"
     assert data["model"] == "test-model"
 
 
@@ -152,7 +153,23 @@ def test_chat_completions_no_user_message(client: TestClient) -> None:
         json={"messages": [{"role": "assistant", "content": "only"}]},
     )
     assert res.status_code == 400
-    assert "No user message" in res.json()["error"]["message"]
+    assert "user message" in res.json()["error"]["message"].lower()
+
+
+def test_transcript_multi_turn_echoed_in_prompt(client: TestClient) -> None:
+    res = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "mid"},
+                {"role": "user", "content": "last"},
+            ],
+        },
+    )
+    assert res.status_code == 200
+    out = res.json()["choices"][0]["message"]["content"]
+    assert "first" in out and "mid" in out and "last" in out
 
 
 def test_chat_completions_cli_failure(echo_settings) -> None:

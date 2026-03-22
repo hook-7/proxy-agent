@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from proxy_agent.schemas.messages_prompt import extract_last_user_text
 from proxy_agent.schemas.openai import (
     ChatMessage,
     build_chat_completion,
-    extract_last_user_text,
     openai_error_payload,
 )
 
@@ -33,10 +33,42 @@ def test_extract_last_user_text_no_user_raises() -> None:
         extract_last_user_text([ChatMessage(role="assistant", content="x")])
 
 
-def test_extract_last_user_text_multimodal_raises() -> None:
-    with pytest.raises(ValueError, match="Multimodal"):
+def test_extract_last_user_text_multimodal_openai_shape() -> None:
+    assert (
         extract_last_user_text(
-            [ChatMessage(role="user", content=[{"type": "text", "text": "x"}])]
+            [ChatMessage(role="user", content=[{"type": "text", "text": "hello"}])]
+        )
+        == "hello"
+    )
+
+
+def test_extract_last_user_text_multimodal_joins_text_parts() -> None:
+    assert (
+        extract_last_user_text(
+            [
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "a"},
+                        {"type": "image_url", "image_url": {"url": "x"}},
+                        {"type": "text", "text": "b"},
+                    ],
+                )
+            ]
+        )
+        == "a\nb"
+    )
+
+
+def test_extract_last_user_text_multimodal_no_text_raises() -> None:
+    with pytest.raises(ValueError, match="no usable text"):
+        extract_last_user_text(
+            [
+                ChatMessage(
+                    role="user",
+                    content=[{"type": "image_url", "image_url": {"url": "https://x"}}],
+                )
+            ]
         )
 
 

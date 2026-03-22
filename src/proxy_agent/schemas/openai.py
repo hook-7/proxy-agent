@@ -40,16 +40,23 @@ class ModelsListResponse(BaseModel):
     data: list[ModelInfo]
 
 
-def extract_last_user_text(messages: list[ChatMessage]) -> str:
-    for msg in reversed(messages):
-        if msg.role != "user":
+def _text_from_multimodal_parts(parts: list[dict[str, Any]]) -> str:
+    """Collect OpenAI-style text blocks; ignore images / unknown types."""
+    texts: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
             continue
-        if msg.content is None:
-            raise ValueError("Last user message has empty content")
-        if isinstance(msg.content, list):
-            raise ValueError("Multimodal user content is not supported; use a string")
-        return msg.content
-    raise ValueError("No user message found in messages")
+        ptype = part.get("type")
+        if ptype not in ("text", "input_text"):
+            continue
+        raw = part.get("text")
+        if isinstance(raw, str) and raw.strip():
+            texts.append(raw)
+    if not texts:
+        raise ValueError(
+            "Last user message has no usable text (multimodal content had no text parts; images are not passed to the CLI)"
+        )
+    return "\n".join(texts)
 
 
 def build_chat_completion(
@@ -152,10 +159,13 @@ def stream_chunk_finish(
     created: int,
     model: str,
 ) -> dict[str, Any]:
-    return build_stream_chunk(
+    chunk = build_stream_chunk(
         completion_id=completion_id,
         created=created,
         model=model,
         delta={},
         finish_reason="stop",
     )
+    # OpenAI-compatible stream terminator hint for clients that wait for usage / final shape
+    chunk["usage"] = None
+    return chunk
