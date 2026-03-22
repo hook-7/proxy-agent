@@ -1,4 +1,4 @@
-"""OpenAI-compatible proxy for a local agent CLI. Implementation lives in ``app.py``."""
+"""OpenAI-compatible proxy for a local agent CLI."""
 
 from proxy_agent.app import app, create_app, run
 

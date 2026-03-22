@@ -1,0 +1,14 @@
+services:
+  proxy-agent:
+    build: .
+    image: proxy-agent:latest
+    container_name: proxy-agent
+    ports:
+      - "${PROXY_AGENT_PORT:-8000}:8000"
+    environment:
+      # 其余配置（含 CURSOR_API_KEY、API_KEY 等）可写在 .env；见 README「Docker」与「配置说明」
+      AGENT_COMMAND: ${AGENT_COMMAND:-agent}
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
