@@ -2,6 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-pytest-green.svg)](https://pytest.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 将本机 **Agent CLI**（例如 Cursor 的 `agent -p`）包装成 **OpenAI Chat Completions** 兼容的 HTTP 服务，便于在任意支持 OpenAI API 的客户端里使用本地代理。
 
@@ -143,4 +144,4 @@ pytest
 
 ## 许可证
 
-尚未指定开源许可证；如需分发或二次开发，请自行补充 `LICENSE` 文件或与本仓库维护者确认授权条款。
+本项目采用 [MIT 许可证](LICENSE) 发布。
