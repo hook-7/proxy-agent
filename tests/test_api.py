@@ -26,6 +26,32 @@ def _parse_sse_events(body: str) -> list[dict | None]:
     return events
 
 
+def test_chat_completions_stream_transcript_multi_turn(client: TestClient) -> None:
+    """Streaming must receive full transcript in argv (echo) so multi-turn context is preserved."""
+    res = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "mid"},
+                {"role": "user", "content": "last"},
+            ],
+            "stream": True,
+        },
+    )
+    assert res.status_code == 200
+    events = _parse_sse_events(res.text)
+    combined = "".join(
+        e["choices"][0]["delta"].get("content") or ""
+        for e in events
+        if e is not None and "choices" in e
+    )
+    assert "first" in combined and "mid" in combined and "last" in combined
+    non_done = [e for e in events if e is not None]
+    assert non_done[-1].get("usage") is not None
+    assert non_done[-1]["usage"]["total_tokens"] >= 2
+
+
 def test_chat_completions_stream_sse_echo(client: TestClient) -> None:
     res = client.post(
         "/v1/chat/completions",
@@ -54,7 +80,9 @@ def test_chat_completions_stream_multiple_chunks() -> None:
     script = Path(__file__).resolve().parent / "fixtures" / "stream_lines.py"
     settings = Settings(
         agent_command=sys.executable,
-        agent_args_template=f"{script} {{prompt}}",
+        agent_args_standard_template=f"{script} {{prompt}}",
+        agent_args_stream_template=f"{script} {{prompt}}",
+        agent_stream_protocol="passthrough",
         agent_timeout_sec=30.0,
         default_model="stream-test",
     )
@@ -78,7 +106,9 @@ def test_chat_completions_stream_multiple_chunks() -> None:
 def test_chat_completions_stream_timeout_yields_error_chunk() -> None:
     settings = Settings(
         agent_command="sleep",
-        agent_args_template="{prompt}",
+        agent_args_standard_template="{prompt}",
+        agent_args_stream_template="{prompt}",
+        agent_stream_protocol="passthrough",
         agent_timeout_sec=0.2,
         default_model="t",
         agent_messages_format="last_user_only",
@@ -98,7 +128,9 @@ def test_chat_completions_simulated_agent_multiline_reply() -> None:
     script = Path(__file__).resolve().parent / "fixtures" / "fake_agent.py"
     settings = Settings(
         agent_command=sys.executable,
-        agent_args_template=f"{script} {{prompt}}",
+        agent_args_standard_template=f"{script} {{prompt}}",
+        agent_args_stream_template=f"{script} {{prompt}}",
+        agent_stream_protocol="passthrough",
         agent_timeout_sec=30.0,
         default_model="fake-agent",
     )
@@ -174,7 +206,11 @@ def test_transcript_multi_turn_echoed_in_prompt(client: TestClient) -> None:
 
 def test_chat_completions_cli_failure(echo_settings) -> None:
     bad = echo_settings.model_copy(
-        update={"agent_command": "/bin/false", "agent_args_template": "{prompt}"}
+        update={
+            "agent_command": "/bin/false",
+            "agent_args_standard_template": "{prompt}",
+            "agent_args_stream_template": "{prompt}",
+        }
     )
     app = create_app(bad)
     with TestClient(app) as c:
@@ -218,3 +254,77 @@ def test_chat_with_invalid_bearer(authed_client: TestClient) -> None:
         json={"messages": [{"role": "user", "content": "x"}]},
     )
     assert res.status_code == 401
+
+
+def test_chat_completions_stream_cursor_ndjson_forwards_plain_text_lines() -> None:
+    """Non-JSON stdout lines still become delta.content (mixed / non-Cursor CLIs)."""
+    script = Path(__file__).resolve().parent / "fixtures" / "print_plain_line.sh"
+    settings = Settings(
+        agent_command="bash",
+        agent_args_standard_template=f"{script} {{prompt}}",
+        agent_args_stream_template=f"{script} {{prompt}}",
+        agent_stream_protocol="cursor_ndjson",
+        agent_timeout_sec=30.0,
+        default_model="ndjson-plain",
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        res = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "x"}], "stream": True},
+        )
+    assert res.status_code == 200
+    events = [e for e in _parse_sse_events(res.text) if e is not None]
+    parts = [
+        e["choices"][0]["delta"].get("content")
+        for e in events
+        if e.get("choices") and e["choices"][0]["delta"].get("content")
+    ]
+    assert "plain-line" in "".join(parts)
+
+
+def test_chat_completions_stream_cursor_ndjson_assistant_deltas() -> None:
+    script = Path(__file__).resolve().parent / "fixtures" / "fake_cursor_stream_json.py"
+    settings = Settings(
+        agent_command=sys.executable,
+        agent_args_standard_template=f"{script} {{prompt}}",
+        agent_args_stream_template=f"{script} {{prompt}}",
+        agent_stream_protocol="cursor_ndjson",
+        agent_timeout_sec=30.0,
+        default_model="ndjson-test",
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        res = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "x"}], "stream": True},
+        )
+    assert res.status_code == 200
+    events = [e for e in _parse_sse_events(res.text) if e is not None]
+    parts = [
+        e["choices"][0]["delta"].get("content")
+        for e in events
+        if e.get("choices") and e["choices"][0]["delta"].get("content")
+    ]
+    assert "".join(parts) == "alphabeta"
+
+
+def test_chat_completions_standard_json_result_field() -> None:
+    script = Path(__file__).resolve().parent / "fixtures" / "print_json_result.py"
+    settings = Settings(
+        agent_command=sys.executable,
+        agent_args_standard_template=f"{script} {{prompt}}",
+        agent_args_stream_template=f"{script} {{prompt}}",
+        agent_stream_protocol="passthrough",
+        agent_standard_output_format="json",
+        agent_timeout_sec=30.0,
+        default_model="json-standard",
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        res = c.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "ignored"}]},
+        )
+    assert res.status_code == 200
+    assert res.json()["choices"][0]["message"]["content"] == "standard-json-body"

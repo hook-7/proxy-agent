@@ -3,17 +3,22 @@ from __future__ import annotations
 import asyncio
 import codecs
 import errno
+import os
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 _STDERR_TAIL_MAX = 8000
+# After stdout is done, never block the HTTP stream forever on stderr EOF quirks / orphan children.
+_STDERR_DRAIN_MAX_SEC = 12.0
 
 
 def _kill_process(proc: asyncio.subprocess.Process) -> None:
-    """SIGKILL the child; ignore if already reaped (uvloop/asyncio may raise ProcessLookupError)."""
+    """SIGKILL the direct child; ignore if already reaped (uvloop/asyncio may raise ProcessLookupError)."""
 
     try:
         proc.kill()
@@ -22,6 +27,28 @@ def _kill_process(proc: asyncio.subprocess.Process) -> None:
     except OSError as e:
         if e.errno != errno.ESRCH:
             raise
+
+
+def _kill_agent_tree(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the child's **process group** when possible so wrapper+agent shells cannot outlive the parent.
+
+    ``start_new_session=True`` makes the spawned PID the group leader; ``killpg`` then matches
+    ``stdbuf``/``bash -c`` trees that would otherwise leave a grandchild holding our stdout/stderr pipes.
+    """
+
+    pid = proc.pid
+    if pid is not None and sys.platform != "win32":
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except OSError as e:
+            if e.errno in (errno.ESRCH, errno.EPERM):
+                pass
+            else:
+                raise
+    _kill_process(proc)
 
 
 class AgentCliError(Exception):
@@ -77,6 +104,7 @@ async def run_agent_cli(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        start_new_session=True,
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
@@ -84,7 +112,7 @@ async def run_agent_cli(
             timeout=timeout_sec,
         )
     except TimeoutError:
-        _kill_process(proc)
+        _kill_agent_tree(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except TimeoutError:
@@ -125,6 +153,8 @@ async def stream_agent_cli(
 
     If *stdout_chunk_size* is 0, use line mode (``readline``) instead.
 
+    Each read is bounded by the global *timeout_sec* budget only.
+
     After stdout reaches EOF, wait at most *eof_process_wait_sec* (unless 0 = use only global
     *timeout_sec* budget) for the process to exit. If it still runs but we already streamed stdout,
     the process is killed so the HTTP stream can emit ``[DONE]`` (many CLIs print then hang).
@@ -158,6 +188,7 @@ async def stream_agent_cli(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                start_new_session=True,
             )
         except OSError as e:
             yield f"[failed to start agent: {e}]\n"
@@ -182,9 +213,12 @@ async def stream_agent_cli(
                 if remaining() <= 0:
                     raise TimeoutError
                 try:
-                    line_b = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining())
+                    line_b = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=remaining(),
+                    )
                 except TimeoutError:
-                    _kill_process(proc)
+                    _kill_agent_tree(proc)
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=5.0)
                     except TimeoutError:
@@ -210,7 +244,7 @@ async def stream_agent_cli(
                         timeout=remaining(),
                     )
                 except TimeoutError:
-                    _kill_process(proc)
+                    _kill_agent_tree(proc)
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=5.0)
                     except TimeoutError:
@@ -233,7 +267,7 @@ async def stream_agent_cli(
                 yield tail
 
         if remaining() <= 0:
-            _kill_process(proc)
+            _kill_agent_tree(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:
@@ -254,7 +288,7 @@ async def stream_agent_cli(
         try:
             await asyncio.wait_for(proc.wait(), timeout=wait_cap)
         except TimeoutError:
-            _kill_process(proc)
+            _kill_agent_tree(proc)
             try:
                 await asyncio.wait_for(
                     proc.wait(),
@@ -278,20 +312,11 @@ async def stream_agent_cli(
                 exit_code=None,
                 stderr="",
             ) from None
+        drain_cap = min(_STDERR_DRAIN_MAX_SEC, max(0.0, remaining()))
         try:
-            await asyncio.wait_for(drain_task, timeout=remaining())
+            await asyncio.wait_for(drain_task, timeout=drain_cap)
         except TimeoutError:
-            _kill_process(proc)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except TimeoutError:
-                pass
             await cancel_drain()
-            raise AgentCliError(
-                f"Agent CLI timed out after {timeout_sec} seconds",
-                exit_code=None,
-                stderr="",
-            ) from None
 
         stderr = b"".join(stderr_parts).decode(errors="replace")
         code = proc.returncode or 0
@@ -305,7 +330,7 @@ async def stream_agent_cli(
             yield stderr if stderr.endswith("\n") else stderr + "\n"
     finally:
         if proc is not None and proc.returncode is None:
-            _kill_process(proc)
+            _kill_agent_tree(proc)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:

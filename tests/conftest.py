@@ -11,7 +11,9 @@ from proxy_agent.main import create_app
 def echo_settings() -> Settings:
     return Settings(
         agent_command="echo",
-        agent_args_template="{prompt}",
+        agent_args_standard_template="{prompt}",
+        agent_args_stream_template="{prompt}",
+        agent_stream_protocol="passthrough",
         agent_timeout_sec=30.0,
         api_key=None,
         default_model="test-model",
@@ -29,7 +31,9 @@ def client(echo_settings: Settings) -> TestClient:
 def authed_settings() -> Settings:
     return Settings(
         agent_command="echo",
-        agent_args_template="{prompt}",
+        agent_args_standard_template="{prompt}",
+        agent_args_stream_template="{prompt}",
+        agent_stream_protocol="passthrough",
         agent_timeout_sec=30.0,
         api_key="test-secret-key",
         default_model="authed-model",

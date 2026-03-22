@@ -5,17 +5,31 @@ import secrets
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
-ChatRole = Literal["system", "user", "assistant", "tool", "developer"]
+ChatRole = Literal["system", "user", "assistant", "tool", "developer", "function"]
 
 
 class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     role: ChatRole
     content: str | list[dict[str, Any]] | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def coerce_content_list(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            return [v]
+        return v
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     model: str | None = None
     messages: list[ChatMessage]
     stream: bool | None = None
@@ -40,22 +54,45 @@ class ModelsListResponse(BaseModel):
     data: list[ModelInfo]
 
 
-def _text_from_multimodal_parts(parts: list[dict[str, Any]]) -> str:
-    """Collect OpenAI-style text blocks; ignore images / unknown types."""
+def _text_from_multimodal_parts(parts: list[Any], *, strict: bool) -> str:
+    """Collect text from OpenAI / Responses / OpenClaw-style content parts."""
+
     texts: list[str] = []
     for part in parts:
+        if isinstance(part, str):
+            s = part.strip()
+            if s:
+                texts.append(s)
+            continue
         if not isinstance(part, dict):
             continue
         ptype = part.get("type")
-        if ptype not in ("text", "input_text"):
+        if ptype in ("text", "input_text", "output_text"):
+            raw = part.get("text")
+            if isinstance(raw, str) and raw.strip():
+                texts.append(raw)
+            continue
+        if ptype in (
+            "image_url",
+            "input_image",
+            "image",
+            "file",
+            "audio",
+            "video",
+            "thinking",
+            "redacted_thinking",
+            "reasoning",
+        ):
             continue
         raw = part.get("text")
         if isinstance(raw, str) and raw.strip():
             texts.append(raw)
     if not texts:
-        raise ValueError(
-            "Last user message has no usable text (multimodal content had no text parts; images are not passed to the CLI)"
-        )
+        if strict:
+            raise ValueError(
+                "Last user message has no usable text (multimodal content had no text parts; images are not passed to the CLI)"
+            )
+        return ""
     return "\n".join(texts)
 
 
@@ -158,6 +195,7 @@ def stream_chunk_finish(
     completion_id: str,
     created: int,
     model: str,
+    usage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     chunk = build_stream_chunk(
         completion_id=completion_id,
@@ -166,6 +204,5 @@ def stream_chunk_finish(
         delta={},
         finish_reason="stop",
     )
-    # OpenAI-compatible stream terminator hint for clients that wait for usage / final shape
-    chunk["usage"] = None
+    chunk["usage"] = usage if usage is not None else None
     return chunk

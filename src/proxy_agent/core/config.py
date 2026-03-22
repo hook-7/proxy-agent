@@ -13,7 +13,14 @@ class Settings(BaseSettings):
     )
 
     agent_command: str = "agent"
-    agent_args_template: str = "-p {prompt}"
+    #: Non-streaming: Cursor headless ``--print`` + final answer as text (see Cursor CLI docs).
+    agent_args_standard_template: str = "-p --output-format text {prompt}"
+    #: Streaming: default matches plain-text stdout (OpenClaw / pi-ai friendly); override for Cursor ``stream-json``.
+    agent_args_stream_template: str = "-p --output-format text {prompt}"
+    #: ``cursor_ndjson``: parse stdout lines as stream-json; ``passthrough``: forward raw stdout chunks.
+    agent_stream_protocol: Literal["cursor_ndjson", "passthrough"] = "passthrough"
+    #: For blocking responses: ``text`` uses stdout as-is; ``json`` expects ``{"result": "..."}``.
+    agent_standard_output_format: Literal["text", "json"] = "text"
     agent_cwd: Path | None = None
     agent_timeout_sec: float = 300.0
     agent_stream_stdout_chunk_size: int = 4096
