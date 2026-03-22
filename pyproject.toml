@@ -22,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-proxy-agent = "proxy_agent.main:run"
+proxy-agent = "proxy_agent.app:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/proxy_agent"]
