@@ -1,7 +1,7 @@
 services:
   proxy-agent:
     build: .
-    image: proxy-agent:latest
+    image: n0vacore/claw-cli:latest
     container_name: proxy-agent
     ports:
       - "${PROXY_AGENT_PORT:-8000}:8000"
