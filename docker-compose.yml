@@ -1,14 +1,17 @@
 services:
   proxy-agent:
-    build: .
-    image: n0vacore/claw-cli:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: n0vacore/claw-cli:v1.0.2
     container_name: proxy-agent
-    ports:
-      - "${PROXY_AGENT_PORT:-8000}:8000"
+    network_mode: host
     environment:
-      # 其余配置（含 CURSOR_API_KEY、API_KEY 等）可写在 .env；见 README「Docker」与「配置说明」
-      AGENT_COMMAND: ${AGENT_COMMAND:-agent}
+      - AGENT_COMMAND=${AGENT_COMMAND:-agent}
     env_file:
       - path: .env
         required: false
+    volumes:
+      - /home/Hook/.cursor:/root/.cursor:rw
     restart: always
+    command: ["uvicorn", "proxy_agent.app:app", "--host", "0.0.0.0", "--port", "8088"]

@@ -1,34 +1,27 @@
-# proxy-agent: OpenAI-compatible HTTP proxy + Cursor Agent CLI
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim AS base
 
-# Official Cursor Agent CLI installer needs bash, curl, tar (see https://cursor.com/install )
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    curl \
-    tar \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV HOME=/root
-ENV PATH="/root/.local/bin:${PATH}"
-
-RUN curl -fsSL https://cursor.com/install | bash
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        tar \
+        curl \
+        gnupg \
+        ca-certificates \
+        libpq-dev \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && curl -fsSL https://cursor.com/install | bash \
+    && corepack enable \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
-COPY src/proxy_agent ./src/proxy_agent/
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY src ./src
 
-RUN pip install --upgrade pip \
-    && pip install .
-
-EXPOSE 8000
-
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import socket; s=socket.create_connection(('127.0.0.1',8000),2); s.close()"
-
-CMD ["uvicorn", "proxy_agent.app:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN uv pip install --system -e .
