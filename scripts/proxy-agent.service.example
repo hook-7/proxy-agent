@@ -1,0 +1,22 @@
+# systemd 用户服务示例（安装前把 @@REPO_ROOT@@ 换成本仓库绝对路径）
+#
+#   sed "s|@@REPO_ROOT@@|$(pwd)|g" scripts/proxy-agent.service.example > ~/.config/systemd/user/proxy-agent.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now proxy-agent.service
+#
+# 端口/监听：在单元里加 Environment=，或在此 WorkingDirectory 下放置 .env（应用会读取）
+
+[Unit]
+Description=proxy-agent OpenAI-compatible HTTP proxy for local agent CLI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@REPO_ROOT@@
+ExecStart=/usr/bin/bash @@REPO_ROOT@@/scripts/proxy-agent-service.sh run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
