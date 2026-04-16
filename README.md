@@ -114,6 +114,31 @@ curl -sS http://127.0.0.1:8000/v1/models \
   -H "Authorization: Bearer your-secret"
 ```
 
+## Hermes 协作工作流
+
+如果你希望把本项目当成 **Hermes ↔ Cursor agent** 的中转层使用：
+
+- 协作文档：[`docs/hermes-proxy-workflow.md`](docs/hermes-proxy-workflow.md)
+- 命令行辅助脚本：[`scripts/hermes_proxy_chat.py`](scripts/hermes_proxy_chat.py)
+
+最小例子：
+
+```bash
+python3 scripts/hermes_proxy_chat.py "Summarize this repository"
+```
+
+指定 base URL：
+
+```bash
+python3 scripts/hermes_proxy_chat.py --base-url http://127.0.0.1:8088 "Review this diff"
+```
+
+通过 stdin 发送较长上下文：
+
+```bash
+cat /tmp/context.txt | python3 scripts/hermes_proxy_chat.py --stdin
+```
+
 ## 项目结构
 
 实现按职责分布在 [`src/proxy_agent/`](src/proxy_agent/) 下，例如：
